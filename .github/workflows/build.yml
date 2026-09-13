@@ -1,0 +1,266 @@
+name: Build TelegramAdminApp
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: "8.7"
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # =========================================================
+      # 1. CHECKOUT REPOSITORY
+      # =========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+
+      # =========================================================
+      # 2. FIND AND EXTRACT PROJECT ZIP
+      # =========================================================
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching for TelegramAdminApp project ZIP..."
+
+          ZIP="$(find . -maxdepth 2 -type f \
+            -name 'TelegramAdminApp-v2*.zip' \
+            -print -quit)"
+
+          if [[ -z "$ZIP" ]]; then
+            echo "::error::TelegramAdminApp-v2*.zip was not found."
+
+            echo "Repository files:"
+            find . -maxdepth 3 -type f | sort
+
+            exit 1
+          fi
+
+          echo "Found project archive:"
+          echo "$ZIP"
+
+          # Remove any previous extracted project
+          rm -rf TelegramAdminApp
+
+          # IMPORTANT:
+          # -q = quiet
+          # -o = overwrite existing files without asking
+          unzip -qo "$ZIP"
+
+          echo "Checking Android project..."
+
+          test -f TelegramAdminApp/settings.gradle.kts
+          test -f TelegramAdminApp/build.gradle.kts
+          test -f TelegramAdminApp/app/build.gradle.kts
+
+          echo "Android project extracted successfully."
+
+
+      # =========================================================
+      # 3. SET UP JAVA 17
+      # =========================================================
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+
+      # =========================================================
+      # 4. SET UP ANDROID SDK
+      # =========================================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+
+      # =========================================================
+      # 5. INSTALL ANDROID SDK PACKAGES
+      # =========================================================
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Accepting Android SDK licenses..."
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          echo "Installing required Android SDK packages..."
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+          echo "Android SDK installation complete."
+
+
+      # =========================================================
+      # 6. SET UP GRADLE 8.7
+      # =========================================================
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+
+      # =========================================================
+      # 7. VERIFY BUILD ENVIRONMENT
+      # =========================================================
+      - name: Verify build environment
+        working-directory: TelegramAdminApp
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "========================================"
+          echo "JAVA VERSION"
+          echo "========================================"
+
+          java -version
+
+          echo ""
+          echo "========================================"
+          echo "GRADLE VERSION"
+          echo "========================================"
+
+          gradle --version
+
+          echo ""
+          echo "========================================"
+          echo "ANDROID PROJECT"
+          echo "========================================"
+
+          ls -la
+
+          echo ""
+          echo "Gradle files:"
+
+          find . -maxdepth 4 -type f \
+            \( -name "*.gradle" \
+            -o -name "*.gradle.kts" \
+            -o -name "gradle-wrapper.properties" \) \
+            -print | sort
+
+
+      # =========================================================
+      # 8. RUN UNIT TESTS
+      # =========================================================
+      - name: Run unit tests
+        working-directory: TelegramAdminApp
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Running unit tests..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            testDebugUnitTest
+
+          echo "Unit tests completed successfully."
+
+
+      # =========================================================
+      # 9. BUILD DEBUG APK
+      # =========================================================
+      - name: Build debug APK
+        working-directory: TelegramAdminApp
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Building Debug APK..."
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
+
+          echo "APK build command completed."
+
+
+      # =========================================================
+      # 10. VERIFY APK
+      # =========================================================
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="TelegramAdminApp/app/build/outputs/apk/debug/app-debug.apk"
+
+          echo "Checking APK..."
+
+          if [[ ! -f "$APK" ]]; then
+            echo "::error::APK was not created."
+            exit 1
+          fi
+
+          if [[ ! -s "$APK" ]]; then
+            echo "::error::APK file is empty."
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "       APK BUILD SUCCESSFUL"
+          echo "========================================"
+          echo ""
+
+          ls -lh "$APK"
+
+
+      # =========================================================
+      # 11. UPLOAD APK AS GITHUB ARTIFACT
+      # =========================================================
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: TelegramAdminApp-debug
+          path: TelegramAdminApp/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+
+      # =========================================================
+      # 12. BUILD SUMMARY
+      # =========================================================
+      - name: Build summary
+        if: success()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "TelegramAdminApp BUILD COMPLETE"
+          echo "========================================"
+          echo ""
+          echo "APK:"
+          echo "TelegramAdminApp-debug"
+          echo ""
+          echo "Download the APK from:"
+          echo "GitHub Actions → Artifacts"
