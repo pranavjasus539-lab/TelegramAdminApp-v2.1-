@@ -1,0 +1,121 @@
+name: Build TelegramAdminApp
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: '8.7'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # The Android project is stored inside the distribution ZIP.
+      # Extract it before setup-gradle so Gradle's cache can see the build files.
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="$(find . -maxdepth 2 -type f -name 'TelegramAdminApp-v2*.zip' -print -quit)"
+          if [[ -z "$ZIP" ]]; then
+            echo "::error::No TelegramAdminApp-v2*.zip project archive was found in the repository."
+            exit 1
+          fi
+
+          rm -rf TelegramAdminApp
+          mkdir -p TelegramAdminApp
+          unzip -qo "$ZIP" -d TelegramAdminApp
+
+          test -f TelegramAdminApp/settings.gradle.kts
+          test -f TelegramAdminApp/build.gradle.kts
+          test -f TelegramAdminApp/app/build.gradle.kts
+
+          echo "Project extracted successfully."
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Verify toolchain and project
+        working-directory: TelegramAdminApp
+        run: |
+          set -euo pipefail
+          java -version
+          gradle --version
+          find . -maxdepth 4 -type f \( -name '*.gradle' -o -name '*.gradle.kts' -o -name 'gradle-wrapper.properties' \) -print | sort
+
+      - name: Run unit tests
+        working-directory: TelegramAdminApp
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace testDebugUnitTest
+
+      - name: Build debug APK
+        working-directory: TelegramAdminApp
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="TelegramAdminApp/app/build/outputs/apk/debug/app-debug.apk"
+          DEST="TelegramAdminApp/app/build/outputs/apk/debug/TelegramAdminApp-v2.1.apk"
+
+          if [[ ! -s "$SRC" ]]; then
+            echo "::error::Debug APK was not generated."
+            exit 1
+          fi
+
+          mv "$SRC" "$DEST"
+          echo "APK renamed successfully:"
+          ls -lh "$DEST"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v6
+        with:
+          name: TelegramAdminApp-v2.1
+          path: TelegramAdminApp/app/build/outputs/apk/debug/TelegramAdminApp-v2.1.apk
+          if-no-files-found: error
+          retention-days: 14
