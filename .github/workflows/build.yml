@@ -1,0 +1,123 @@
+name: Build TelegramAdminApp
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+
+      # 1. Checkout repository
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # 2. Extract the Android project ZIP
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -maxdepth 2 -type f \
+            -name 'TelegramAdminApp-v2*.zip' \
+            -print -quit)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: Android project ZIP not found"
+            exit 1
+          fi
+
+          echo "Found: $ZIP"
+
+          unzip -o "$ZIP" -d .
+
+          echo "Checking Android project..."
+
+          test -f settings.gradle.kts
+          test -f build.gradle.kts
+          test -f app/build.gradle.kts
+
+          echo "Android project found successfully."
+
+      # 3. Java 17
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 4. Android SDK
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # 5. Install Android SDK
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # 6. Gradle
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.7'
+
+      # 7. Check project
+      - name: Check project
+        run: |
+          java -version
+          gradle --version
+
+          echo "Project files:"
+          find app -maxdepth 3 -type f | sort
+
+      # 8. Run tests
+      - name: Run tests
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        run: |
+          gradle --no-daemon testDebugUnitTest --stacktrace
+
+      # 9. Build APK
+      - name: Build APK
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_OWNER_ID: ${{ secrets.TELEGRAM_OWNER_ID }}
+        run: |
+          gradle --no-daemon assembleDebug --stacktrace
+
+      # 10. Check APK
+      - name: Verify APK
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK was not created"
+            exit 1
+          fi
+
+          echo "APK CREATED SUCCESSFULLY"
+          ls -lh "$APK"
+
+      # 11. Upload APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TelegramAdminApp-v2.1-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
